@@ -1,0 +1,104 @@
+# Prometheus scrape configuration for conn-exporter
+# Add this job configuration to your prometheus.yml file under the 'scrape_configs' section
+
+scrape_configs:
+  - job_name: 'conn-exporter'
+    # How frequently to scrape targets from this job
+    scrape_interval: 15s
+    # Per-scrape timeout when scraping this job
+    scrape_timeout: 10s
+    # The HTTP resource path on which to fetch metrics from targets
+    metrics_path: /metrics
+    # Configures the protocol scheme used for requests
+    scheme: http
+    
+    # Static targets configuration
+    static_configs:
+      - targets: ['localhost:9100']
+        labels:
+          instance: 'conn-exporter'
+          service: 'network-monitoring'
+          environment: 'production'  # Change as needed
+    
+    # Optional: Add relabeling rules
+    relabel_configs:
+      # Add a custom label to identify this exporter
+      - target_label: __tmp_exporter_type
+        replacement: 'conn-exporter'
+      
+      # Optionally rename the instance label
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: 'localhost:9100'
+
+---
+# Alternative configuration for multiple instances
+# Use this if you want to monitor conn-exporter on multiple hosts
+
+scrape_configs:
+  - job_name: 'conn-exporter-multi-host'
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    metrics_path: /metrics
+    scheme: http
+    
+    static_configs:
+      # Add multiple targets here
+      - targets: 
+          - 'server1.example.com:9100'
+          - 'server2.example.com:9100'
+          - 'server3.example.com:9100'
+        labels:
+          service: 'network-monitoring'
+          environment: 'production'
+      
+      - targets:
+          - 'dev-server1.example.com:9100'
+        labels:
+          service: 'network-monitoring'
+          environment: 'development'
+
+---
+# Configuration with service discovery (for Kubernetes environments)
+# Use this if running in Kubernetes with service discovery
+
+scrape_configs:
+  - job_name: 'conn-exporter-k8s'
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names:
+            - monitoring
+            - default
+    
+    relabel_configs:
+      # Only scrape pods with the conn-exporter annotation
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+        action: keep
+        regex: true
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_job]
+        action: keep
+        regex: conn-exporter
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+        action: replace
+        target_label: __metrics_path__
+        regex: (.+)
+      - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+        action: replace
+        regex: ([^:]+)(?::\d+)?;(\d+)
+        replacement: $1:$2
+        target_label: __address__
+      - action: labelmap
+        regex: __meta_kubernetes_pod_label_(.+)
+      - source_labels: [__meta_kubernetes_namespace]
+        action: replace
+        target_label: kubernetes_namespace
+      - source_labels: [__meta_kubernetes_pod_name]
+        action: replace
+        target_label: kubernetes_pod_name

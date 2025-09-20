@@ -1,0 +1,61 @@
+# Useful PromQL Queries for conn-exporter metrics
+
+# 1. Total number of network connections
+sum(network_connections_info)
+
+# 2. Connections by state
+sum(network_connections_info) by (state)
+
+# 3. Connections by interface
+sum(network_connections_info) by (interface)
+
+# 4. Connections by source address
+sum(network_connections_info) by (source_address)
+
+# 5. Established connections only
+sum(network_connections_info{state="ESTABLISHED"})
+
+# 6. Listening ports by interface
+network_connections_info{state="LISTEN"} by (interface, source_port)
+
+# 7. External connections (non-localhost)
+sum(network_connections_info{source_address!~"127\\.0\\.0\\.1|0\\.0\\.0\\.0"})
+
+# 8. Connections per interface over time
+sum(rate(network_connections_info[5m])) by (interface)
+
+# 9. Top 10 destination ports
+topk(10, sum(network_connections_info) by (destination_port))
+
+# 10. Top 10 source ports
+topk(10, sum(network_connections_info) by (source_port))
+
+# 11. Connections by state and interface
+sum(network_connections_info) by (state, interface)
+
+# 12. SSH connections (port 22)
+network_connections_info{source_port="22"} or network_connections_info{destination_port="22"}
+
+# 13. HTTP/HTTPS connections
+network_connections_info{destination_port=~"80|443"}
+
+# 14. Count of TIME_WAIT connections (may indicate connection issues)
+sum(network_connections_info{state="TIME_WAIT"})
+
+# 15. Connections from specific interface
+sum(network_connections_info{interface="eth0"})
+
+# 16. Alert for too many connections
+sum(network_connections_info) > 1000
+
+# 17. Alert for no listening services on important ports
+absent(network_connections_info{state="LISTEN", source_port="22"})
+
+# 18. Rate of new connections (approximate)
+rate(network_connections_info{state="ESTABLISHED"}[5m])
+
+# 19. Connections to external IPs by interface
+sum(network_connections_info{destination_address!~"127\\.0\\.0\\.1|0\\.0\\.0\\.0|192\\.168\\..*|10\\..*|172\\.(1[6-9]|2[0-9]|3[01])\\..*"}) by (interface)
+
+# 20. Monitor specific application port
+network_connections_info{source_port="9100"} # Prometheus metrics port

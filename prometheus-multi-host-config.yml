@@ -1,0 +1,182 @@
+# Multi-Host Prometheus Configuration for conn-exporter
+# Add this to your prometheus.yml file
+
+scrape_configs:
+  # Single job for all conn-exporter instances
+  - job_name: 'conn-exporter-multi-host'
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    metrics_path: /metrics
+    scheme: http
+    
+    static_configs:
+      # Production servers
+      - targets:
+          - 'server1.example.com:9100'
+          - 'server2.example.com:9100'
+          - 'server3.example.com:9100'
+        labels:
+          environment: 'production'
+          datacenter: 'dc1'
+      
+      # Development servers
+      - targets:
+          - 'dev-server1.example.com:9100'
+          - 'dev-server2.example.com:9100'
+        labels:
+          environment: 'development'
+          datacenter: 'dc1'
+      
+      # Staging servers
+      - targets:
+          - 'staging-server1.example.com:9100'
+        labels:
+          environment: 'staging'
+          datacenter: 'dc2'
+    
+    # Add custom labels to identify hosts clearly
+    relabel_configs:
+      # Extract hostname from target address
+      - source_labels: [__address__]
+        target_label: __tmp_host
+        regex: '([^:]+)(:\d+)?'
+        replacement: '${1}'
+      
+      # Create a clean hostname label
+      - source_labels: [__tmp_host]
+        target_label: hostname
+        regex: '(.+)'
+        replacement: '${1}'
+      
+      # Create a short hostname label (without domain)
+      - source_labels: [__tmp_host]
+        target_label: host
+        regex: '([^.]+)\..*'
+        replacement: '${1}'
+      
+      # Keep the original instance label
+      - source_labels: [__address__]
+        target_label: instance
+
+---
+# Alternative configuration with explicit host labels
+# Use this if you prefer to manually assign host labels
+
+scrape_configs:
+  - job_name: 'conn-exporter-labeled'
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    metrics_path: /metrics
+    scheme: http
+    
+    static_configs:
+      - targets: ['192.168.1.10:9100']
+        labels:
+          host: 'web-server-01'
+          hostname: 'web-server-01.prod.example.com'
+          environment: 'production'
+          role: 'webserver'
+          datacenter: 'dc1'
+      
+      - targets: ['192.168.1.11:9100']
+        labels:
+          host: 'web-server-02'
+          hostname: 'web-server-02.prod.example.com'
+          environment: 'production'
+          role: 'webserver'
+          datacenter: 'dc1'
+      
+      - targets: ['192.168.1.20:9100']
+        labels:
+          host: 'db-server-01'
+          hostname: 'db-server-01.prod.example.com'
+          environment: 'production'
+          role: 'database'
+          datacenter: 'dc1'
+      
+      - targets: ['10.0.1.10:9100']
+        labels:
+          host: 'app-server-01'
+          hostname: 'app-server-01.prod.example.com'
+          environment: 'production'
+          role: 'application'
+          datacenter: 'dc2'
+
+---
+# Kubernetes service discovery configuration
+# Use this if running in Kubernetes
+
+scrape_configs:
+  - job_name: 'conn-exporter-k8s'
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names:
+            - monitoring
+            - kube-system
+            - default
+    
+    relabel_configs:
+      # Only scrape pods with conn-exporter annotations
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+        action: keep
+        regex: true
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_job]
+        action: keep
+        regex: conn-exporter
+      
+      # Use custom port if specified
+      - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+        action: replace
+        regex: ([^:]+)(?::\d+)?;(\d+)
+        replacement: $1:$2
+        target_label: __address__
+      
+      # Use custom path if specified
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+        action: replace
+        target_label: __metrics_path__
+        regex: (.+)
+      
+      # Add Kubernetes labels as Prometheus labels
+      - action: labelmap
+        regex: __meta_kubernetes_pod_label_(.+)
+      
+      # Add namespace as a label
+      - source_labels: [__meta_kubernetes_namespace]
+        action: replace
+        target_label: kubernetes_namespace
+      
+      # Add pod name as hostname
+      - source_labels: [__meta_kubernetes_pod_name]
+        action: replace
+        target_label: host
+      
+      # Add node name
+      - source_labels: [__meta_kubernetes_pod_node_name]
+        action: replace
+        target_label: kubernetes_node
+
+---
+# Example with file-based service discovery
+# Use this for dynamic host discovery from external systems
+
+scrape_configs:
+  - job_name: 'conn-exporter-file-sd'
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    
+    file_sd_configs:
+      - files:
+          - '/etc/prometheus/targets/conn-exporter-*.yml'
+        refresh_interval: 30s
+    
+    relabel_configs:
+      # Extract hostname from target
+      - source_labels: [__address__]
+        target_label: hostname
+        regex: '([^:]+)(:\d+)?'
+        replacement: '${1}'
