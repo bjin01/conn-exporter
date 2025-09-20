@@ -29,8 +29,16 @@ func getNetworkInterfaces() (map[string]string, error) {
 	ipToInterface := make(map[string]string)
 
 	for _, iface := range interfaces {
+		// Skip interfaces that are down or loopback
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+
+		// Get addresses for this interface, but handle errors gracefully
 		addrs, err := iface.Addrs()
 		if err != nil {
+			// Log warning but continue with other interfaces
+			log.Printf("Warning: Could not get addresses for interface %s: %v", iface.Name, err)
 			continue
 		}
 
@@ -41,11 +49,14 @@ func getNetworkInterfaces() (map[string]string, error) {
 				ip = v.IP
 			case *net.IPAddr:
 				ip = v.IP
+			default:
+				// Skip unknown address types
+				continue
 			}
 
 			if ip != nil {
-				// Only map IPv4 addresses for now
-				if ip.To4() != nil {
+				// Only map IPv4 addresses for now (IPv6 ready for future)
+				if ip.To4() != nil && !ip.IsLoopback() {
 					ipToInterface[ip.String()] = iface.Name
 				}
 			}
@@ -68,6 +79,20 @@ func getInterfaceForIP(ip string) string {
 
 	if iface, exists := interfaceCache[ip]; exists {
 		return iface
+	}
+
+	// If IP not found in cache, try to refresh the cache once
+	// This handles dynamic interface changes (containers, etc.)
+	var err error
+	interfaceCache, err = getNetworkInterfaces()
+	if err != nil {
+		log.Printf("Error refreshing network interfaces: %v", err)
+		// Continue with fallback logic below
+	} else {
+		// Check again after refresh
+		if iface, exists := interfaceCache[ip]; exists {
+			return iface
+		}
 	}
 
 	// For special addresses
