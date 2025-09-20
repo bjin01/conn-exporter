@@ -68,36 +68,95 @@ func getNetworkInterfaces() (map[string]string, error) {
 
 // getInterfaceForIP returns the interface name for a given IP address
 func getInterfaceForIP(ip string) string {
+	// Initialize or refresh interface cache if needed
 	if interfaceCache == nil {
 		var err error
 		interfaceCache, err = getNetworkInterfaces()
 		if err != nil {
 			log.Printf("Error getting network interfaces: %v", err)
+			// Return "unknown" but don't crash the whole program
 			return "unknown"
 		}
 	}
 
+	// Check exact IP match first
 	if iface, exists := interfaceCache[ip]; exists {
 		return iface
 	}
 
-	// If IP not found in cache, try to refresh the cache once
-	// This handles dynamic interface changes (containers, etc.)
-	var err error
-	interfaceCache, err = getNetworkInterfaces()
-	if err != nil {
-		log.Printf("Error refreshing network interfaces: %v", err)
-		// Continue with fallback logic below
-	} else {
+	// Handle special addresses
+	switch ip {
+	case "127.0.0.1":
+		return "lo"
+	case "0.0.0.0":
+		// For 0.0.0.0 (listen on all), find the primary interface
+		// Try to find the default route interface or first non-loopback interface
+		return getPrimaryInterface()
+	default:
+		// If IP not found in cache, try to refresh the cache once
+		// This handles dynamic interface changes (containers, etc.)
+		var err error
+		interfaceCache, err = getNetworkInterfaces()
+		if err != nil {
+			log.Printf("Error refreshing network interfaces: %v", err)
+			return "unknown"
+		}
+		
 		// Check again after refresh
 		if iface, exists := interfaceCache[ip]; exists {
 			return iface
 		}
 	}
 
-	// For special addresses
-	if ip == "0.0.0.0" || ip == "127.0.0.1" {
-		return "lo"
+	return "unknown"
+}
+
+// getPrimaryInterface returns the primary network interface name
+func getPrimaryInterface() string {
+	// Try to find interfaces with IPv4 addresses (excluding loopback)
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return "unknown"
+	}
+
+	// First, try to find the interface with a default gateway (eth0, etc.)
+	for _, iface := range interfaces {
+		// Skip loopback and down interfaces
+		if iface.Flags&net.FlagLoopback != 0 || iface.Flags&net.FlagUp == 0 {
+			continue
+		}
+		
+		// Prefer ethernet interfaces
+		if strings.HasPrefix(iface.Name, "eth") || strings.HasPrefix(iface.Name, "en") {
+			addrs, err := iface.Addrs()
+			if err != nil {
+				continue
+			}
+			// Check if it has an IPv4 address
+			for _, addr := range addrs {
+				if ipnet, ok := addr.(*net.IPNet); ok && ipnet.IP.To4() != nil {
+					return iface.Name
+				}
+			}
+		}
+	}
+
+	// Fallback: return first up interface with IPv4 (excluding loopback)
+	for _, iface := range interfaces {
+		if iface.Flags&net.FlagLoopback != 0 || iface.Flags&net.FlagUp == 0 {
+			continue
+		}
+		
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		
+		for _, addr := range addrs {
+			if ipnet, ok := addr.(*net.IPNet); ok && ipnet.IP.To4() != nil {
+				return iface.Name
+			}
+		}
 	}
 
 	return "unknown"
@@ -285,7 +344,13 @@ func main() {
 	collector := newNetworkConnectionsCollector()
 	prometheus.MustRegister(collector)
 
+	// Get port from environment variable or use default
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "9100"
+	}
+	
 	http.Handle("/metrics", promhttp.Handler())
-	log.Println("Beginning to serve on port :9100")
-	log.Fatal(http.ListenAndServe(":9100", nil))
+	log.Printf("Beginning to serve on port :%s", port)
+	log.Fatal(http.ListenAndServe(":"+port, nil))
 }
