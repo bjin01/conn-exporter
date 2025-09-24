@@ -628,9 +628,9 @@ type networkConnectionsCollector struct {
 func newNetworkConnectionsCollector() *networkConnectionsCollector {
 	return &networkConnectionsCollector{
 		metric: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, subsystem, "info"),
-			"Network connection information",
-			[]string{"source_address", "source_port", "destination_address", "destination_port", "state", "interface"},
+			"network_connections_info",
+			"Information about network connections",
+			[]string{"source_address", "source_port", "destination_address", "destination_port", "state", "interface", "protocol"},
 			nil,
 		),
 	}
@@ -641,12 +641,23 @@ func (c *networkConnectionsCollector) Describe(ch chan<- *prometheus.Desc) {
 }
 
 func (c *networkConnectionsCollector) Collect(ch chan<- prometheus.Metric) {
+	// Collect TCP connections
 	tcpConnections, err := getTCPConnections("/proc/net/tcp")
 	if err != nil {
 		log.Printf("Error getting TCP connections: %v", err)
 	} else {
 		for _, conn := range tcpConnections {
-			ch <- prometheus.MustNewConstMetric(c.metric, prometheus.GaugeValue, 1, conn.sourceAddress, conn.sourcePort, conn.destinationAddress, conn.destinationPort, conn.state, conn.sourceInterface)
+			ch <- prometheus.MustNewConstMetric(c.metric, prometheus.GaugeValue, 1, conn.sourceAddress, conn.sourcePort, conn.destinationAddress, conn.destinationPort, conn.state, conn.sourceInterface, "tcp")
+		}
+	}
+
+	// Collect UDP sockets
+	udpConnections, err := getUDPConnections("/proc/net/udp")
+	if err != nil {
+		log.Printf("Error getting UDP connections: %v", err)
+	} else {
+		for _, conn := range udpConnections {
+			ch <- prometheus.MustNewConstMetric(c.metric, prometheus.GaugeValue, 1, conn.sourceAddress, conn.sourcePort, conn.destinationAddress, conn.destinationPort, conn.state, conn.sourceInterface, "udp")
 		}
 	}
 
@@ -657,6 +668,15 @@ func (c *networkConnectionsCollector) Collect(ch chan<- prometheus.Metric) {
 		log.Printf("Error getting TCP6 connections: %v", err)
 	} else {
 		for _, conn := range tcp6Connections {
+			ch <- prometheus.MustNewConstMetric(c.metric, prometheus.GaugeValue, 1, conn.sourceAddress, conn.sourcePort, conn.destinationAddress, conn.destinationPort, conn.state, conn.sourceInterface)
+		}
+	}
+	
+	udp6Connections, err := getUDPConnections("/proc/net/udp6")
+	if err != nil {
+		log.Printf("Error getting UDP6 connections: %v", err)
+	} else {
+		for _, conn := range udp6Connections {
 			ch <- prometheus.MustNewConstMetric(c.metric, prometheus.GaugeValue, 1, conn.sourceAddress, conn.sourcePort, conn.destinationAddress, conn.destinationPort, conn.state, conn.sourceInterface)
 		}
 	}
@@ -792,6 +812,70 @@ func connectionState(s string) string {
 	default:
 		return "UNKNOWN"
 	}
+}
+
+// getUDPConnections parses UDP sockets from /proc/net/udp
+func getUDPConnections(file string) ([]tcpConnection, error) {
+	f, err := os.Open(file)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	var connections []tcpConnection
+
+	scanner := bufio.NewScanner(f)
+	scanner.Scan() // Skip header line
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		fields := strings.Fields(line)
+		if len(fields) < 10 {
+			continue
+		}
+
+		localAddress := fields[1]
+		remoteAddress := fields[2]
+		// UDP sockets don't have traditional states, but we can use the socket state
+		// For UDP, we'll use "LISTEN" for bound sockets and "UNCONN" for unconnected
+		state := "UNCONN" // Default for UDP
+		
+		// Check if it's a bound UDP socket (local port is not 0)
+		sourceAddress, sourcePort, err := parseAddress(localAddress)
+		if err != nil {
+			log.Printf("Error parsing local address: %v", err)
+			continue
+		}
+		
+		// For UDP, if there's a local address bound, consider it "listening"
+		if sourcePort != "0" {
+			state = "LISTEN"
+		}
+
+		destinationAddress, destinationPort, err := parseAddress(remoteAddress)
+		if err != nil {
+			log.Printf("Error parsing remote address: %v", err)
+			continue
+		}
+
+		// Get network interface for source IP (use same logic as TCP connections)
+		sourceInterface := getInterfaceForConnection(sourceAddress, destinationAddress)
+
+		connections = append(connections, tcpConnection{
+			sourceAddress:      sourceAddress,
+			sourcePort:         sourcePort,
+			destinationAddress: destinationAddress,
+			destinationPort:    destinationPort,
+			state:              state,
+			sourceInterface:    sourceInterface,
+		})
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+
+	return connections, nil
 }
 
 func main() {
