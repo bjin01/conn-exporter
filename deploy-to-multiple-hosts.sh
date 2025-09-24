@@ -234,21 +234,40 @@ EOF
 test_deployments() {
     log_info "Testing all deployments..."
     
+    local pids=()
     local failed_hosts=()
+    local successful_hosts=0
     
     for host_name in "${!HOSTS[@]}"; do
-        ssh_target="${HOSTS[$host_name]}"
-        target_host="${ssh_target#*@}"
-        
-        log_info "Testing $host_name ($target_host)..."
-        
-        if curl -s --max-time 5 "http://$target_host:$SERVICE_PORT/metrics" | grep -q network_connections_info; then
-            log_info "✓ $host_name is working correctly"
+        (
+            ssh_target="${HOSTS[$host_name]}"
+            target_host="${ssh_target#*@}"
+            
+            echo -e "${YELLOW}[TEST]${NC} Testing $host_name ($target_host)..."
+            
+            if curl -s --max-time 5 "http://$target_host:$SERVICE_PORT/metrics" | grep -q network_connections_info; then
+                log_info "✓ $host_name is working correctly"
+                exit 0
+            else
+                log_error "✗ $host_name is not responding properly"
+                exit 1
+            fi
+        ) &
+        pids+=($!)
+    done
+    
+    # Wait for all tests to finish
+    for i in "${!pids[@]}"; do
+        host_name="${!HOSTS[@]:i:1}"
+        if wait "${pids[i]}"; then
+            ((successful_hosts++))
         else
-            log_error "✗ $host_name is not responding properly"
             failed_hosts+=("$host_name")
         fi
     done
+    
+    echo "---"
+    log_info "Test summary: $successful_hosts successful, ${#failed_hosts[@]} failed."
     
     if [ ${#failed_hosts[@]} -eq 0 ]; then
         log_info "All deployments are working correctly!"

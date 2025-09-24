@@ -1,0 +1,31 @@
+# Simple Prometheus Configuration with Host Labels for Grafana Dashboard
+# Replace your existing prometheus.yml scrape_configs section with this:
+
+scrape_configs:
+  - job_name: 'conn-exporter-multi-host'
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    metrics_path: /metrics
+    scheme: http
+
+    static_configs:
+      - targets:
+          - 'sap03.susedemo.de:9100'
+          - 'bokvm.susedemo.de:9100'
+        labels:
+          environment: 'production'
+          datacenter: 'dc1'
+
+    # Add host labels for Grafana dashboard compatibility
+    metric_relabel_configs:
+      # Extract full hostname (remove port) - use 'instance' not '__address__'
+      - source_labels: [instance]
+        regex: '([^:]+):.*'
+        target_label: hostname
+        replacement: '${1}'
+      
+      # Extract short hostname for dashboard dropdown (sap03, bokvm)
+      - source_labels: [hostname]  
+        regex: '([^.]+)\..*'
+        target_label: host
+        replacement: '${1}'

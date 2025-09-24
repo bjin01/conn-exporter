@@ -1,0 +1,52 @@
+[Unit]
+Description=Network Connection Exporter
+Documentation=https://github.com/bjin01/conn-exporter
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/conn-exporter
+Restart=always
+RestartSec=5
+
+# Run as root to access network information
+User=root
+Group=root
+
+# Environment
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# Security settings (relaxed for network monitoring)
+NoNewPrivileges=true
+ProtectSystem=true
+ProtectHome=true
+ProtectKernelTunables=false
+ProtectKernelModules=true
+ProtectControlGroups=true
+PrivateTmp=true
+PrivateDevices=false
+RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK AF_UNIX
+RestrictNamespaces=false
+RestrictRealtime=true
+RestrictSUIDSGID=false
+LockPersonality=true
+MemoryDenyWriteExecute=false
+
+# Allow network monitoring syscalls
+SystemCallFilter=@system-service @network-io @process
+SystemCallErrorNumber=EPERM
+
+# Capabilities needed for network monitoring
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+# Working directory
+WorkingDirectory=/
+
+[Install]
+WantedBy=multi-user.target

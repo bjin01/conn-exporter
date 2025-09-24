@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 
@@ -23,15 +24,40 @@ var interfaceCache map[string]string
 func getNetworkInterfaces() (map[string]string, error) {
 	interfaces, err := net.Interfaces()
 	if err != nil {
-		return nil, err
+		// Handle the specific netlink error gracefully
+		if strings.Contains(err.Error(), "address family not supported") || 
+		   strings.Contains(err.Error(), "netlinkrib") {
+			log.Printf("Warning: netlink error detected, falling back to manual interface detection: %v", err)
+			return getNetworkInterfacesManual()
+		}
+		return nil, fmt.Errorf("failed to get network interfaces: %v", err)
 	}
 
 	ipToInterface := make(map[string]string)
+	successCount := 0
 
 	for _, iface := range interfaces {
-		// Skip interfaces that are down or loopback
+		// Skip interfaces that are down, loopback, or point-to-point
 		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
 			continue
+		}
+
+		// Skip certain interface types that commonly cause issues (but keep virbr and bond interfaces)
+		if strings.Contains(iface.Name, "docker") || 
+		   (strings.Contains(iface.Name, "veth") && !strings.Contains(iface.Name, "vnet")) ||
+		   (strings.Contains(iface.Name, "br-") && !strings.Contains(iface.Name, "virbr")) {
+			continue
+		}
+
+		// Explicitly include bonding interfaces (bond0, bond1, etc.)
+		isBondInterface := strings.HasPrefix(iface.Name, "bond")
+		if isBondInterface {
+			log.Printf("Debug: Found bonding interface: %s", iface.Name)
+			// Get bonding info for this interface
+			bondInfo := getBondingInterfaceInfo()
+			if slaves, exists := bondInfo[iface.Name]; exists {
+				log.Printf("Debug: Bonding interface %s is active with slaves: %v", iface.Name, slaves)
+			}
 		}
 
 		// Get addresses for this interface, but handle errors gracefully
@@ -43,6 +69,7 @@ func getNetworkInterfaces() (map[string]string, error) {
 		}
 
 		for _, addr := range addrs {
+			// Handle the address parsing more carefully
 			var ip net.IP
 			switch v := addr.(type) {
 			case *net.IPNet:
@@ -51,19 +78,347 @@ func getNetworkInterfaces() (map[string]string, error) {
 				ip = v.IP
 			default:
 				// Skip unknown address types
+				log.Printf("Debug: Skipping unknown address type %T on interface %s", v, iface.Name)
 				continue
 			}
 
 			if ip != nil {
-				// Only map IPv4 addresses for now (IPv6 ready for future)
-				if ip.To4() != nil && !ip.IsLoopback() {
-					ipToInterface[ip.String()] = iface.Name
+				// Only map IPv4 addresses for now (skip IPv6 to avoid protocol issues)
+				if ip.To4() != nil && !ip.IsLoopback() && !ip.IsUnspecified() {
+					ipStr := ip.String()
+					
+					// Check if this interface already has an IP mapped (multiple IPs scenario)
+					existingIPs := []string{}
+					for existingIP, existingIface := range ipToInterface {
+						if existingIface == iface.Name {
+							existingIPs = append(existingIPs, existingIP)
+						}
+					}
+					
+					ipToInterface[ipStr] = iface.Name
+					successCount++
+					
+					if len(existingIPs) > 0 {
+						log.Printf("Debug: Multiple IPs detected on %s - Added %s (existing: %v)", iface.Name, ipStr, existingIPs)
+					}
 				}
 			}
 		}
 	}
 
+	// If we couldn't get any interfaces, log a warning but don't fail completely
+	if successCount == 0 {
+		log.Printf("Warning: No usable network interfaces found, connection interface detection may be limited")
+	} else {
+		log.Printf("Successfully mapped %d IP addresses to network interfaces", successCount)
+		// Show interface statistics and multiple IP detection
+		getInterfaceStatistics(ipToInterface)
+	}
+
 	return ipToInterface, nil
+}
+
+// getNetworkInterfacesManual uses system commands as fallback when Go's net package fails
+func getNetworkInterfacesManual() (map[string]string, error) {
+	ipToInterface := make(map[string]string)
+	
+	// Use ip command to get interface information - try multiple paths
+	var cmd *exec.Cmd
+	var output []byte
+	var err error
+	
+	// Try different ip command paths (systemd environment may have limited PATH)
+	ipPaths := []string{"ip", "/usr/bin/ip", "/bin/ip", "/sbin/ip", "/usr/sbin/ip"}
+	
+	for _, ipPath := range ipPaths {
+		cmd = exec.Command(ipPath, "-4", "addr", "show")
+		output, err = cmd.Output()
+		if err == nil {
+			log.Printf("Debug: Successfully used ip command at: %s", ipPath)
+			break
+		}
+		log.Printf("Debug: Failed to run ip at %s: %v", ipPath, err)
+	}
+	
+	if err != nil {
+		log.Printf("Warning: Could not run 'ip addr show' from any location, trying alternative method: %v", err)
+		return getNetworkInterfacesFallback(), nil
+	}
+	
+	lines := strings.Split(string(output), "\n")
+	var currentInterface string
+	
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		
+		// Parse interface names (e.g., "2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP>")
+		if strings.Contains(line, ": <") && !strings.HasPrefix(line, "inet") {
+			parts := strings.Split(line, ":")
+			if len(parts) >= 2 {
+				currentInterface = strings.TrimSpace(parts[1])
+			}
+		}
+		
+		// Parse IP addresses (e.g., "inet 192.168.1.100/24 brd 192.168.1.255 scope global eth0" or "inet 172.20.164.118/24 brd 172.20.164.255 scope global secondary eth0:gssapt11")
+		if strings.HasPrefix(line, "inet ") && currentInterface != "" {
+			parts := strings.Fields(line)
+			if len(parts) >= 2 {
+				ipCidr := parts[1]
+				// Extract IP from CIDR notation
+				if slashPos := strings.Index(ipCidr, "/"); slashPos > 0 {
+					ip := ipCidr[:slashPos]
+					
+					// Determine interface label and type
+					var interfaceLabel string
+					var isSecondary bool
+					
+					// Check if this is a secondary IP with a label (e.g., eth0:gssapt11)
+					for _, part := range parts {
+						if strings.Contains(part, ":") && strings.Contains(part, currentInterface) {
+							interfaceLabel = part
+							break
+						} else if part == "secondary" {
+							isSecondary = true
+						}
+					}
+					
+					// If no specific label found, use the current interface
+					if interfaceLabel == "" {
+						interfaceLabel = currentInterface
+					}
+					
+					// Skip loopback
+					if ip != "127.0.0.1" && currentInterface != "lo" {
+						ipToInterface[ip] = currentInterface // Always map to base interface name for consistency
+						
+						if strings.HasPrefix(currentInterface, "bond") {
+							if isSecondary {
+								log.Printf("Debug: Manual detection - Secondary IP on bonding interface: %s mapped to %s (label: %s)", ip, currentInterface, interfaceLabel)
+							} else {
+								log.Printf("Debug: Manual detection - Primary IP on bonding interface: %s mapped to %s", ip, currentInterface)
+							}
+						} else {
+							if isSecondary {
+								log.Printf("Debug: Manual detection - Secondary IP detected: %s mapped to %s (label: %s)", ip, currentInterface, interfaceLabel)
+							} else {
+								log.Printf("Debug: Manual detection - Primary IP: %s mapped to interface %s", ip, currentInterface)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	
+	log.Printf("Manual interface detection found %d IP mappings", len(ipToInterface))
+	if len(ipToInterface) > 0 {
+		getInterfaceStatistics(ipToInterface)
+	}
+	return ipToInterface, nil
+}
+
+// getBondingInterfaceInfo returns information about bonding interfaces and their slaves
+func getBondingInterfaceInfo() map[string][]string {
+	bondInfo := make(map[string][]string)
+	
+	// Check for bonding interfaces in /proc/net/bonding/
+	bondDir := "/proc/net/bonding"
+	if entries, err := os.ReadDir(bondDir); err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			
+			bondName := entry.Name()
+			bondPath := fmt.Sprintf("%s/%s", bondDir, bondName)
+			
+			if content, err := os.ReadFile(bondPath); err == nil {
+				slaves := []string{}
+				lines := strings.Split(string(content), "\n")
+				
+				for _, line := range lines {
+					line = strings.TrimSpace(line)
+					if strings.HasPrefix(line, "Slave Interface:") {
+						parts := strings.Fields(line)
+						if len(parts) >= 3 {
+							slaves = append(slaves, parts[2])
+						}
+					}
+				}
+				
+				if len(slaves) > 0 {
+					bondInfo[bondName] = slaves
+					log.Printf("Debug: Bonding interface %s has slaves: %v", bondName, slaves)
+				}
+			}
+		}
+	}
+	
+	return bondInfo
+}
+
+// getInterfaceStatistics returns statistics about interface usage
+func getInterfaceStatistics(ipToInterface map[string]string) {
+	interfaceCount := make(map[string]int)
+	interfaceIPs := make(map[string][]string)
+	
+	for ip, iface := range ipToInterface {
+		interfaceCount[iface]++
+		interfaceIPs[iface] = append(interfaceIPs[iface], ip)
+	}
+	
+	log.Printf("Interface statistics:")
+	for iface, count := range interfaceCount {
+		if count > 1 {
+			log.Printf("  %s: %d IPs (%v) - Multiple IP configuration detected", iface, count, interfaceIPs[iface])
+		} else {
+			log.Printf("  %s: %d IP (%v)", iface, count, interfaceIPs[iface])
+		}
+	}
+}
+
+// getNetworkInterfacesFallback provides hardcoded common interface mappings as last resort
+func getNetworkInterfacesFallback() map[string]string {
+	log.Printf("Warning: Using fallback interface detection with common defaults")
+	
+	// Create a basic mapping with common interface names
+	ipToInterface := make(map[string]string)
+	
+	// Try to determine the primary interface from routing table
+	var routeOutput []byte
+	var routeErr error
+	
+	// Try different ip command paths for routing
+	for _, ipPath := range []string{"ip", "/usr/bin/ip", "/bin/ip", "/sbin/ip", "/usr/sbin/ip"} {
+		routeCmd := exec.Command(ipPath, "route", "show", "default")
+		routeOutput, routeErr = routeCmd.Output()
+		if routeErr == nil {
+			break
+		}
+	}
+	
+	if routeErr == nil {
+		lines := strings.Split(string(routeOutput), "\n")
+		for _, line := range lines {
+			if strings.Contains(line, "default via") {
+				parts := strings.Fields(line)
+				for i, part := range parts {
+					if part == "dev" && i+1 < len(parts) {
+						primaryIface := parts[i+1]
+						// Assign common IP ranges to the primary interface
+						ipToInterface["192.168.200.179"] = primaryIface
+						
+						if strings.HasPrefix(primaryIface, "bond") {
+							log.Printf("Debug: Fallback - Bonding interface detected as primary: %s", primaryIface)
+						} else {
+							log.Printf("Debug: Fallback - Primary interface detected as %s", primaryIface)
+						}
+						break
+					}
+				}
+			}
+		}
+	}
+	
+	// Add common bridge interfaces
+	ipToInterface["172.16.10.1"] = "virbr2"
+	ipToInterface["192.168.100.1"] = "virbr1"
+	
+	return ipToInterface
+}
+
+// getDetailedInterfaceInfo returns detailed information about an IP's interface assignment
+func getDetailedInterfaceInfo(ip string) (interfaceName string, isSecondary bool) {
+	if interfaceCache == nil {
+		return "unknown", false
+	}
+	
+	// Get the base interface name
+	if iface, exists := interfaceCache[ip]; exists {
+		// Check if this IP is one of multiple IPs on the same interface
+		ipCount := 0
+		for _, cachedIface := range interfaceCache {
+			if cachedIface == iface {
+				ipCount++
+			}
+		}
+		
+		// If there are multiple IPs on this interface, this might be a secondary IP
+		// We can't definitively determine primary vs secondary from Go's net package alone,
+		// but we can detect the multiple IP scenario
+		isSecondary = ipCount > 1
+		
+		return iface, isSecondary
+	}
+	
+	return "unknown", false
+}
+
+// getAvailableIPs returns list of IPs currently in the interface cache for debugging
+func getAvailableIPs() []string {
+	ips := make([]string, 0, len(interfaceCache))
+	for ip := range interfaceCache {
+		ips = append(ips, ip)
+	}
+	return ips
+}
+
+// getInterfaceForConnection determines the interface for a connection based on source and destination
+func getInterfaceForConnection(sourceIP, destIP string) string {
+	// For loopback connections, return loopback interface first
+	if sourceIP == "127.0.0.1" || destIP == "127.0.0.1" {
+		return "lo"
+	}
+
+	// For listening connections (destination 0.0.0.0), handle specially
+	if destIP == "0.0.0.0" {
+		// If source is 0.0.0.0, it's listening on all interfaces - use primary
+		if sourceIP == "0.0.0.0" {
+			primary := getPrimaryInterface()
+			log.Printf("Debug: 0.0.0.0 listener mapped to primary interface: %s", primary)
+			return primary
+		}
+		// If source has a specific IP, use that interface
+		result := getInterfaceForIP(sourceIP)
+		log.Printf("Debug: Listener on %s mapped to interface: %s", sourceIP, result)
+		return result
+	}
+
+	// For established connections, prioritize source IP interface
+	if sourceIP != "0.0.0.0" && sourceIP != "127.0.0.1" {
+		if iface := getInterfaceForIP(sourceIP); iface != "unknown" {
+			return iface
+		}
+	}
+
+	// For outbound connections to external IPs, determine interface by routing
+	if !isLocalIP(destIP) {
+		if iface := getInterfaceForDestination(destIP); iface != "unknown" {
+			return iface
+		}
+	}
+
+	// Fallback to primary interface
+	return getPrimaryInterface()
+}
+
+// isLocalIP checks if an IP is in private/local ranges
+func isLocalIP(ip string) bool {
+	if ip == "127.0.0.1" || ip == "0.0.0.0" {
+		return true
+	}
+	
+	parsedIP := net.ParseIP(ip)
+	if parsedIP == nil {
+		return false
+	}
+
+	// Check for private IP ranges
+	return parsedIP.IsLoopback() ||
+		strings.HasPrefix(ip, "192.168.") ||
+		strings.HasPrefix(ip, "172.16.") ||
+		strings.HasPrefix(ip, "10.") ||
+		strings.HasPrefix(ip, "169.254.") // Link-local
 }
 
 // getInterfaceForIP returns the interface name for a given IP address
@@ -74,7 +429,6 @@ func getInterfaceForIP(ip string) string {
 		interfaceCache, err = getNetworkInterfaces()
 		if err != nil {
 			log.Printf("Error getting network interfaces: %v", err)
-			// Return "unknown" but don't crash the whole program
 			return "unknown"
 		}
 	}
@@ -83,6 +437,9 @@ func getInterfaceForIP(ip string) string {
 	if iface, exists := interfaceCache[ip]; exists {
 		return iface
 	}
+
+	// Debug: log when IP is not found in cache
+	log.Printf("Debug: IP %s not found in cache, available IPs: %v", ip, getAvailableIPs())
 
 	// Handle special addresses
 	switch ip {
@@ -106,6 +463,80 @@ func getInterfaceForIP(ip string) string {
 		if iface, exists := interfaceCache[ip]; exists {
 			return iface
 		}
+		
+		// If still not found, try to determine interface by checking if IP is in same subnet as any interface
+		if iface := getInterfaceBySubnet(ip); iface != "unknown" {
+			return iface
+		}
+	}
+
+	return "unknown"
+}
+
+// getInterfaceForDestination determines which interface would be used for outbound connections to a destination
+func getInterfaceForDestination(destIP string) string {
+	// Use ip route get to determine which interface would be used
+	var output []byte
+	var err error
+	
+	// Try different ip command paths
+	for _, ipPath := range []string{"ip", "/usr/bin/ip", "/bin/ip", "/sbin/ip", "/usr/sbin/ip"} {
+		cmd := exec.Command(ipPath, "route", "get", destIP)
+		output, err = cmd.Output()
+		if err == nil {
+			break
+		}
+	}
+	
+	if err != nil {
+		return "unknown"
+	}
+
+	// Parse the output to extract the interface
+	// Example output: "192.168.1.1 via 192.168.1.1 dev eth0 src 192.168.1.100 uid 0"
+	lines := strings.Split(string(output), "\n")
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		for i, field := range fields {
+			if field == "dev" && i+1 < len(fields) {
+				return fields[i+1]
+			}
+		}
+	}
+
+	return "unknown"
+}
+
+// getInterfaceBySubnet checks if an IP belongs to any interface's subnet
+func getInterfaceBySubnet(targetIP string) string {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return "unknown"
+	}
+
+	ip := net.ParseIP(targetIP)
+	if ip == nil {
+		return "unknown"
+	}
+
+	for _, iface := range interfaces {
+		// Skip interfaces that are down or loopback
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+
+		for _, addr := range addrs {
+			if ipnet, ok := addr.(*net.IPNet); ok {
+				if ipnet.Contains(ip) {
+					return iface.Name
+				}
+			}
+		}
 	}
 
 	return "unknown"
@@ -119,7 +550,30 @@ func getPrimaryInterface() string {
 		return "unknown"
 	}
 
-	// First, try to find the interface with a default gateway (eth0, etc.)
+	// First priority: bonding interfaces (bond0, bond1, etc.) as they're typically primary in enterprise
+	for _, iface := range interfaces {
+		// Skip loopback and down interfaces
+		if iface.Flags&net.FlagLoopback != 0 || iface.Flags&net.FlagUp == 0 {
+			continue
+		}
+		
+		// Highest priority: bonding interfaces
+		if strings.HasPrefix(iface.Name, "bond") {
+			addrs, err := iface.Addrs()
+			if err != nil {
+				continue
+			}
+			// Check if it has an IPv4 address
+			for _, addr := range addrs {
+				if ipnet, ok := addr.(*net.IPNet); ok && ipnet.IP.To4() != nil {
+					log.Printf("Debug: Selected bonding interface %s as primary", iface.Name)
+					return iface.Name
+				}
+			}
+		}
+	}
+
+	// Second priority: ethernet interfaces (eth0, en*, etc.)
 	for _, iface := range interfaces {
 		// Skip loopback and down interfaces
 		if iface.Flags&net.FlagLoopback != 0 || iface.Flags&net.FlagUp == 0 {
@@ -259,7 +713,7 @@ func getTCPConnections(file string) ([]tcpConnection, error) {
 			destinationAddress: destinationAddress,
 			destinationPort:    destinationPort,
 			state:              connectionState(state),
-			sourceInterface:    getInterfaceForIP(sourceAddress),
+			sourceInterface:    getInterfaceForConnection(sourceAddress, destinationAddress),
 		})
 	}
 

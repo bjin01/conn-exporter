@@ -12,12 +12,12 @@ scrape_configs:
     static_configs:
       # Production servers
       - targets:
-          - 'server1.example.com:9100'
-          - 'server2.example.com:9100'
-          - 'server3.example.com:9100'
+          - 'sap03.susedemo.de:9100'
+          - 'bokvm.susedemo.de:9100'
         labels:
           environment: 'production'
           datacenter: 'dc1'
+          team: 'infrastructure'
       
       # Development servers
       - targets:

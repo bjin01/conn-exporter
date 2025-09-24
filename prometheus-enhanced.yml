@@ -1,0 +1,122 @@
+# Enhanced Prometheus Configuration for your conn-exporter setup
+# File: prometheus.yml
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: 'susedemo-infrastructure'
+
+rule_files:
+  - "conn-exporter-alerts.yml"
+
+scrape_configs:
+  # Your conn-exporter multi-host configuration
+  - job_name: 'conn-exporter-multi-host'
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    metrics_path: /metrics
+    scheme: http
+    
+    static_configs:
+      # Production servers
+      - targets:
+          - 'sap03.susedemo.de:9100'
+          - 'bokvm.susedemo.de:9100'
+        labels:
+          environment: 'production'
+          datacenter: 'dc1'
+          team: 'infrastructure'
+          
+    # Enhance metrics with additional labels
+    metric_relabel_configs:
+      # Extract hostname from instance (remove :9100 port)
+      - source_labels: [__address__]
+        regex: '([^:]+):.*'
+        target_label: hostname
+        replacement: '${1}'
+      
+      # Extract short hostname for dashboard compatibility
+      - source_labels: [hostname]
+        regex: '([^.]+)\..*'
+        target_label: host
+        replacement: '${1}'
+      
+      # Also keep the server label (full hostname without domain)
+      - source_labels: [__address__]
+        regex: '([^.:]+)\..*'
+        target_label: server
+        replacement: '${1}'
+      
+      # Add network interface type classification
+      - source_labels: [interface]
+        regex: '(eth|en)([0-9]+)'
+        target_label: interface_type
+        replacement: 'ethernet'
+      - source_labels: [interface]
+        regex: '(bond)([0-9]+)'
+        target_label: interface_type
+        replacement: 'bonding'
+      - source_labels: [interface]
+        regex: '(virbr|br-)([0-9]+)'
+        target_label: interface_type
+        replacement: 'bridge'
+      - source_labels: [interface]
+        regex: 'lo'
+        target_label: interface_type
+        replacement: 'loopback'
+      
+      # Classify connection types
+      - source_labels: [state]
+        regex: 'LISTEN'
+        target_label: connection_type
+        replacement: 'listener'
+      - source_labels: [state]
+        regex: 'ESTABLISHED'
+        target_label: connection_type
+        replacement: 'active'
+      - source_labels: [state]
+        regex: 'TIME_WAIT|CLOSE_WAIT|FIN_WAIT.*'
+        target_label: connection_type
+        replacement: 'closing'
+      
+      # Identify service ports (common ones)
+      - source_labels: [source_port]
+        regex: '22'
+        target_label: service
+        replacement: 'ssh'
+      - source_labels: [source_port]
+        regex: '80'
+        target_label: service
+        replacement: 'http'
+      - source_labels: [source_port]
+        regex: '443'
+        target_label: service
+        replacement: 'https'
+      - source_labels: [source_port]
+        regex: '53'
+        target_label: service
+        replacement: 'dns'
+      - source_labels: [source_port]
+        regex: '25'
+        target_label: service
+        replacement: 'smtp'
+      - source_labels: [source_port]
+        regex: '3306'
+        target_label: service
+        replacement: 'mysql'
+      - source_labels: [source_port]
+        regex: '5432'
+        target_label: service
+        replacement: 'postgresql'
+      - source_labels: [source_port]
+        regex: '111|2049|20048'
+        target_label: service
+        replacement: 'nfs'
+
+  # Monitor Prometheus itself
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+        labels:
+          service: 'prometheus'

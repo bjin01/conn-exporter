@@ -1,0 +1,101 @@
+# Alerting rules for conn-exporter multi-host monitoring
+# File: conn-exporter-alerts.yml
+
+groups:
+  - name: conn-exporter-alerts
+    rules:
+      # Alert when conn-exporter is down
+      - alert: ConnExporterDown
+        expr: up{job="conn-exporter-multi-host"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          team: infrastructure
+        annotations:
+          summary: "conn-exporter is down on {{ $labels.instance }}"
+          description: "conn-exporter has been down for more than 1 minute on {{ $labels.instance }}"
+
+      # Alert on high number of connections
+      - alert: HighConnectionCount
+        expr: sum(network_connections_info) by (instance, interface) > 1000
+        for: 5m
+        labels:
+          severity: warning
+          team: infrastructure
+        annotations:
+          summary: "High connection count on {{ $labels.instance }}"
+          description: "{{ $labels.instance }} interface {{ $labels.interface }} has {{ $value }} connections"
+
+      # Alert on too many LISTEN connections (potential port exhaustion)
+      - alert: TooManyListeners
+        expr: count(network_connections_info{state="LISTEN"}) by (instance) > 100
+        for: 2m
+        labels:
+          severity: warning
+          team: infrastructure
+        annotations:
+          summary: "Too many listening ports on {{ $labels.instance }}"
+          description: "{{ $labels.instance }} has {{ $value }} listening ports"
+
+      # Alert on unknown interfaces (monitoring issue)
+      - alert: UnknownNetworkInterfaces
+        expr: count(network_connections_info{interface="unknown"}) by (instance) > 0
+        for: 1m
+        labels:
+          severity: warning
+          team: infrastructure
+        annotations:
+          summary: "Unknown network interfaces detected on {{ $labels.instance }}"
+          description: "{{ $labels.instance }} has connections with unknown interfaces - check conn-exporter configuration"
+
+      # Alert on connection state anomalies
+      - alert: HighTimeWaitConnections
+        expr: count(network_connections_info{state="TIME_WAIT"}) by (instance) > 500
+        for: 5m
+        labels:
+          severity: warning
+          team: infrastructure
+        annotations:
+          summary: "High TIME_WAIT connections on {{ $labels.instance }}"
+          description: "{{ $labels.instance }} has {{ $value }} TIME_WAIT connections - possible connection leak"
+
+      # Alert when specific services are not listening
+      - alert: SSHServiceDown
+        expr: count(network_connections_info{state="LISTEN", source_port="22"}) by (instance) == 0
+        for: 2m
+        labels:
+          severity: critical
+          team: infrastructure
+        annotations:
+          summary: "SSH service not listening on {{ $labels.instance }}"
+          description: "SSH (port 22) is not listening on {{ $labels.instance }}"
+
+  - name: conn-exporter-datacenter-alerts
+    rules:
+      # Datacenter-wide connection monitoring
+      - alert: DatacenterConnectionSpike
+        expr: sum(rate(network_connections_info[5m])) by (datacenter) > 100
+        for: 3m
+        labels:
+          severity: info
+          team: infrastructure
+        annotations:
+          summary: "Connection spike in datacenter {{ $labels.datacenter }}"
+          description: "Datacenter {{ $labels.datacenter }} experiencing high connection rate: {{ $value }} conn/sec"
+
+      # Cross-server communication monitoring
+      - alert: InterServerCommunicationDown
+        expr: |
+          count(
+            network_connections_info{
+              state="ESTABLISHED", 
+              destination_address=~"(sap03|bokvm)\\.susedemo\\.de"
+            }
+          ) by (instance) == 0
+        for: 5m
+        labels:
+          severity: warning
+          team: infrastructure
+        annotations:
+          summary: "No inter-server communication from {{ $labels.instance }}"
+          description: "{{ $labels.instance }} has no established connections to other susedemo.de servers"

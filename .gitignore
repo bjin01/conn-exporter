@@ -5,6 +5,7 @@ conn-exporter
 *.dll
 *.so
 *.dylib
+bin/
 
 # Test binary, built with `go test -c`
 *.test

@@ -1,0 +1,120 @@
+# Useful PromQL Queries for conn-exporter Multi-Host Monitoring
+# These queries can be used in Grafana dashboards or for manual analysis
+
+# === CONNECTION OVERVIEW QUERIES ===
+
+# Total connections per server
+sum(network_connections_info) by (instance)
+
+# Connections by state per server
+sum(network_connections_info) by (instance, state)
+
+# Connections by interface per server
+sum(network_connections_info) by (instance, interface)
+
+# === SERVER-SPECIFIC QUERIES ===
+
+# Connections on sap03.susedemo.de
+sum(network_connections_info{instance="sap03.susedemo.de:9100"}) by (interface, state)
+
+# Connections on bokvm.susedemo.de  
+sum(network_connections_info{instance="bokvm.susedemo.de:9100"}) by (interface, state)
+
+# === SERVICE MONITORING QUERIES ===
+
+# SSH connections across all servers
+sum(network_connections_info{source_port="22"}) by (instance, state)
+
+# NFS connections (ports 111, 2049, 20048)
+sum(network_connections_info{source_port=~"111|2049|20048"}) by (instance, state)
+
+# Web services (HTTP/HTTPS)
+sum(network_connections_info{source_port=~"80|443"}) by (instance, state)
+
+# DNS services
+sum(network_connections_info{source_port="53"}) by (instance, state)
+
+# === NETWORK INTERFACE QUERIES ===
+
+# Ethernet interface connections
+sum(network_connections_info{interface=~"eth.*|en.*"}) by (instance, interface)
+
+# Bridge interface connections (virtual networks)
+sum(network_connections_info{interface=~"virbr.*|br-.*"}) by (instance, interface)
+
+# Loopback connections
+sum(network_connections_info{interface="lo"}) by (instance)
+
+# === TIME-BASED ANALYSIS ===
+
+# Connection rate over time (5-minute rate)
+rate(network_connections_info[5m])
+
+# Connection growth over the last hour
+increase(network_connections_info[1h])
+
+# Peak connections in the last 24 hours
+max_over_time(sum(network_connections_info) by (instance)[24h])
+
+# === COMPARATIVE QUERIES ===
+
+# Compare connection counts between servers
+(
+  sum(network_connections_info{instance="sap03.susedemo.de:9100"}) 
+  - 
+  sum(network_connections_info{instance="bokvm.susedemo.de:9100"})
+)
+
+# Server with most connections
+topk(1, sum(network_connections_info) by (instance))
+
+# Most active network interface across all servers
+topk(5, sum(network_connections_info) by (instance, interface))
+
+# === PROBLEM DETECTION QUERIES ===
+
+# Servers with unknown interfaces (monitoring issues)
+count(network_connections_info{interface="unknown"}) by (instance)
+
+# High TIME_WAIT connections (potential issues)
+count(network_connections_info{state="TIME_WAIT"}) by (instance)
+
+# Servers with no listening services
+count(network_connections_info{state="LISTEN"}) by (instance) == 0
+
+# === DATACENTER OVERVIEW ===
+
+# Total connections in production datacenter
+sum(network_connections_info{datacenter="dc1", environment="production"})
+
+# Connection distribution by server in datacenter
+sum(network_connections_info{datacenter="dc1"}) by (instance) / 
+sum(sum(network_connections_info{datacenter="dc1"}) by (instance)) * 100
+
+# === EXTERNAL CONNECTIVITY ===
+
+# Connections to external IPs (not susedemo.de)
+sum(network_connections_info{destination_address!~".*susedemo\\.de|127\\..*|192\\.168\\..*|172\\.16\\..*|10\\..*"}) by (instance)
+
+# Inter-server communication within susedemo.de
+sum(network_connections_info{
+  destination_address=~".*susedemo\\.de",
+  state="ESTABLISHED"
+}) by (instance, destination_address)
+
+# === ALERTING THRESHOLDS ===
+
+# Check if any server has > 1000 connections
+sum(network_connections_info) by (instance) > 1000
+
+# Check if any interface has > 500 connections  
+sum(network_connections_info) by (instance, interface) > 500
+
+# Check for connection imbalance between servers (>50% difference)
+abs(
+  sum(network_connections_info{instance="sap03.susedemo.de:9100"}) -
+  sum(network_connections_info{instance="bokvm.susedemo.de:9100"})
+) / (
+  sum(network_connections_info{instance="sap03.susedemo.de:9100"}) +
+  sum(network_connections_info{instance="bokvm.susedemo.de:9100"})
+) * 2 > 0.5
