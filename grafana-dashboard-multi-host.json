@@ -238,7 +238,8 @@
               "destination_address": 3,
               "destination_port": 4,
               "state": 5,
-              "interface": 6
+              "interface": 6,
+              "process_name": 7
             },
             "renameByName": {
               "destination_address": "Destination Address",
@@ -247,7 +248,8 @@
               "source_address": "Source Address",
               "source_port": "Source Port",
               "state": "State",
-              "host": "Host"
+              "host": "Host",
+              "process_name": "Process Name"
             }
           }
         }
@@ -670,6 +672,98 @@
         }
       ],
       "type": "table"
+    }
+    ,
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Breakdown of connections by direction (incoming vs outgoing)",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "vis": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 42
+      },
+      "id": 8,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(network_connections_info{host=~\"$host\",interface=~\"$interface\",state=~\"$state\"}) by (direction)",
+          "refId": "A"
+        }
+      ],
+      "title": "Connections by Direction",
+      "type": "timeseries"
     }
   ],
   "refresh": "5s",

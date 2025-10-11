@@ -1,21 +1,29 @@
 
+
 package main
 
-import (
-	"bufio"
-	"encoding/hex"
-	"fmt"
-	"log"
-	"net"
-	"net/http"
-	"os"
-	"os/exec"
-	"strconv"
-	"strings"
 
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
+import (
+   "bufio"
+   "encoding/hex"
+   "fmt"
+   "log"
+   "net"
+   "net/http"
+   "os"
+   "os/exec"
+   "strconv"
+   "strings"
+
+   "github.com/prometheus/client_golang/prometheus"
+   "github.com/prometheus/client_golang/prometheus/promhttp"
 )
+
+// directionForEstablishedIncoming returns true if the sourcePort matches a LISTEN port (incoming ESTABLISHED)
+func directionForEstablishedIncoming(sourcePort string, listenPorts map[string]struct{}) bool {
+	_, ok := listenPorts[sourcePort]
+	return ok
+}
 
 // interfaceCache stores the mapping of IP addresses to interface names
 var interfaceCache map[string]string
@@ -626,14 +634,14 @@ type networkConnectionsCollector struct {
 }
 
 func newNetworkConnectionsCollector() *networkConnectionsCollector {
-	return &networkConnectionsCollector{
-		metric: prometheus.NewDesc(
-			"network_connections_info",
-			"Information about network connections",
-			[]string{"source_address", "source_port", "destination_address", "destination_port", "state", "interface", "protocol"},
-			nil,
-		),
-	}
+	 return &networkConnectionsCollector{
+	  metric: prometheus.NewDesc(
+	   "network_connections_info",
+	   "Information about network connections",
+	   []string{"source_address", "source_port", "destination_address", "destination_port", "state", "interface", "protocol", "direction", "process_name"},
+	   nil,
+	  ),
+	 }
 }
 
 func (c *networkConnectionsCollector) Describe(ch chan<- *prometheus.Desc) {
@@ -641,46 +649,40 @@ func (c *networkConnectionsCollector) Describe(ch chan<- *prometheus.Desc) {
 }
 
 func (c *networkConnectionsCollector) Collect(ch chan<- prometheus.Metric) {
-	// Collect TCP connections
-	tcpConnections, err := getTCPConnections("/proc/net/tcp")
+	// Build set of LISTEN ports for direction classification
+	listenPorts := make(map[string]struct{})
+	tcpConnectionsRaw, err := getTCPConnections("/proc/net/tcp", nil)
+	if err == nil {
+		for _, conn := range tcpConnectionsRaw {
+			if conn.state == "LISTEN" {
+				listenPorts[conn.sourcePort] = struct{}{}
+			}
+		}
+	}
+
+	// Collect TCP connections with direction label
+	tcpConnections, err := getTCPConnections("/proc/net/tcp", listenPorts)
 	if err != nil {
 		log.Printf("Error getting TCP connections: %v", err)
 	} else {
 		for _, conn := range tcpConnections {
-			ch <- prometheus.MustNewConstMetric(c.metric, prometheus.GaugeValue, 1, conn.sourceAddress, conn.sourcePort, conn.destinationAddress, conn.destinationPort, conn.state, conn.sourceInterface, "tcp")
+			direction := "outgoing"
+			if _, ok := listenPorts[conn.sourcePort]; ok {
+				direction = "incoming"
+			}
+			ch <- prometheus.MustNewConstMetric(c.metric, prometheus.GaugeValue, 1, conn.sourceAddress, conn.sourcePort, conn.destinationAddress, conn.destinationPort, conn.state, conn.sourceInterface, "tcp", direction, conn.processName)
 		}
 	}
 
-	// Collect UDP sockets
+	// Collect UDP sockets (no direction logic for now)
 	udpConnections, err := getUDPConnections("/proc/net/udp")
 	if err != nil {
 		log.Printf("Error getting UDP connections: %v", err)
 	} else {
-		for _, conn := range udpConnections {
-			ch <- prometheus.MustNewConstMetric(c.metric, prometheus.GaugeValue, 1, conn.sourceAddress, conn.sourcePort, conn.destinationAddress, conn.destinationPort, conn.state, conn.sourceInterface, "udp")
-		}
+		 for _, conn := range udpConnections {
+		  ch <- prometheus.MustNewConstMetric(c.metric, prometheus.GaugeValue, 1, conn.sourceAddress, conn.sourcePort, conn.destinationAddress, conn.destinationPort, conn.state, conn.sourceInterface, "udp", "unknown", "")
+		 }
 	}
-
-	// IPv6 support commented out for future use
-	/*
-	tcp6Connections, err := getTCPConnections("/proc/net/tcp6")
-	if err != nil {
-		log.Printf("Error getting TCP6 connections: %v", err)
-	} else {
-		for _, conn := range tcp6Connections {
-			ch <- prometheus.MustNewConstMetric(c.metric, prometheus.GaugeValue, 1, conn.sourceAddress, conn.sourcePort, conn.destinationAddress, conn.destinationPort, conn.state, conn.sourceInterface)
-		}
-	}
-	
-	udp6Connections, err := getUDPConnections("/proc/net/udp6")
-	if err != nil {
-		log.Printf("Error getting UDP6 connections: %v", err)
-	} else {
-		for _, conn := range udp6Connections {
-			ch <- prometheus.MustNewConstMetric(c.metric, prometheus.GaugeValue, 1, conn.sourceAddress, conn.sourcePort, conn.destinationAddress, conn.destinationPort, conn.state, conn.sourceInterface)
-		}
-	}
-	*/
 }
 
 type tcpConnection struct {
@@ -690,17 +692,67 @@ type tcpConnection struct {
 	destinationPort    string
 	state              string
 	sourceInterface    string
+	 processName       string
 }
 
-func getTCPConnections(file string) ([]tcpConnection, error) {
+func getTCPConnections(file string, listenPorts map[string]struct{}) ([]tcpConnection, error) {
 	f, err := os.Open(file)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
 
-	var connections []tcpConnection
+	// Build a map of (localIP, localPort) to process name using ss -tup
+	cmd := exec.Command("ss", "-tulnp")
+	output, err := cmd.Output()
+	listenProcMap := make(map[string]string) // port -> process name
+	if err == nil {
+		scanner := bufio.NewScanner(strings.NewReader(string(output)))
+		for scanner.Scan() {
+			line := scanner.Text()
+			fields := strings.Fields(line)
+			if len(fields) < 6 {
+				continue
+			}
+			state := fields[1]
+			local := fields[4]
+			procInfo := fields[len(fields)-1]
+			// Only consider LISTEN sockets
+			if state == "LISTEN" && strings.Contains(procInfo, "users:(") {
+				start := strings.Index(procInfo, "(")
+				end := strings.Index(procInfo, ")")
+				if start != -1 && end != -1 && end > start {
+					procDetails := procInfo[start+1 : end]
+					procName := strings.Split(procDetails, ",")[0]
+					procName = strings.Trim(procName, "()[]{} ") // Remove brackets, parentheses, spaces
+					procName = strings.ReplaceAll(procName, "\"", "") // Remove all quotes
+					// Extract port
+					port := ""
+					if strings.HasPrefix(local, "[") {
+						// IPv6 [::]:PORT
+						idx := strings.LastIndex(local, ":")
+						if idx != -1 {
+							port = local[idx+1:]
+						}
+					} else if strings.HasPrefix(local, "*:") {
+						port = strings.Split(local, ":")[1]
+					} else {
+						parts := strings.Split(local, ":")
+						if len(parts) == 2 {
+							port = parts[1]
+						} else if len(parts) > 2 {
+							port = parts[len(parts)-1]
+						}
+					}
+					if port != "" {
+						listenProcMap[port] = procName
+					}
+				}
+			}
+		}
+	}
 
+	var connections []tcpConnection
 	scanner := bufio.NewScanner(f)
 	scanner.Scan() // Skip header line
 
@@ -727,6 +779,17 @@ func getTCPConnections(file string) ([]tcpConnection, error) {
 			continue
 		}
 
+		// Assign process name for LISTEN and ESTABLISHED incoming connections
+		processName := ""
+		isListen := connectionState(state) == "LISTEN"
+		isEstablishedIncoming := connectionState(state) == "ESTABLISHED" && listenPorts != nil && directionForEstablishedIncoming(sourcePort, listenPorts)
+		if isListen || isEstablishedIncoming {
+			if name, ok := listenProcMap[sourcePort]; ok {
+				processName = name
+			}
+		}
+
+
 		connections = append(connections, tcpConnection{
 			sourceAddress:      sourceAddress,
 			sourcePort:         sourcePort,
@@ -734,6 +797,7 @@ func getTCPConnections(file string) ([]tcpConnection, error) {
 			destinationPort:    destinationPort,
 			state:              connectionState(state),
 			sourceInterface:    getInterfaceForConnection(sourceAddress, destinationAddress),
+			processName:        processName,
 		})
 	}
 
